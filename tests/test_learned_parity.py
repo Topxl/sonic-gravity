@@ -252,3 +252,176 @@ def test_the_learned_field_changes_the_forces_it_produces():
     learned = np.asarray(_field_js({**common, "useLearned": True})["grad"])
     rel = np.abs(learned - base).max() / max(np.abs(base).max(), 1e-9)
     assert rel > 1e-3, f"the learned field is indistinguishable from the baseline ({rel:.2e})"
+
+
+# ── Recurrent runtime: one GRU step, forward and backward ───────────────────
+
+SEQ_WEIGHTS = ROOT / "sonic_gravity" / "web" / "model_seq.json"
+
+REC_BRIDGE = """
+import { RecurrentMix } from %(mod)s;
+const input = JSON.parse(await new Promise((res) => {
+  let s = ""; process.stdin.on("data", (d) => (s += d)); process.stdin.on("end", () => res(s));
+}));
+const model = new RecurrentMix(input.weights);
+model.h = Float64Array.from(input.h);
+const P = input.P.map((r) => Float64Array.from(r));
+const g = Float64Array.from(input.g);
+const a = Float64Array.from(input.a);
+const { shape, cache } = model.forward(P, g, a);
+const dG = model.backward(cache, Float64Array.from(input.dShape));
+process.stdout.write(JSON.stringify({
+  shape: Array.from(shape), dG: Array.from(dG), h: Array.from(cache.gru.h),
+}));
+"""
+
+
+def _rec_js(payload: dict) -> dict:
+    script = REC_BRIDGE % {"mod": json.dumps(LEARNED_JS.as_uri())}
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          input=json.dumps(payload), capture_output=True, text=True, timeout=90)
+    if proc.returncode != 0:
+        raise AssertionError(f"node failed:\n{proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def _torch_recurrent(weights: dict):
+    from sonic_gravity.model import RecurrentMixModel
+
+    m = RecurrentMixModel(weights["nBands"], width=weights["width"],
+                          hidden=weights["hidden"], state=weights["state"],
+                          p_law=weights["pLaw"])
+
+    def load(lin, blob):
+        lin.weight.data = torch.tensor(np.array(blob["W"]).T, dtype=torch.float32)
+        lin.bias.data = torch.tensor(np.array(blob["b"]), dtype=torch.float32)
+
+    load(m.enc[0], weights["enc"][0])
+    load(m.enc[2], weights["enc"][1])
+    load(m.dec[0], weights["dec"][0])
+    load(m.dec[2], weights["dec"][1])
+    load(m.dec[4], weights["dec"][2])
+    gw = weights["gru"]
+    m.gru.weight_ih.data = torch.tensor(np.array(gw["Wih"]).T, dtype=torch.float32)
+    m.gru.weight_hh.data = torch.tensor(np.array(gw["Whh"]).T, dtype=torch.float32)
+    m.gru.bias_ih.data = torch.tensor(np.array(gw["bih"]), dtype=torch.float32)
+    m.gru.bias_hh.data = torch.tensor(np.array(gw["bhh"]), dtype=torch.float32)
+    return m.eval().double()
+
+
+@pytest.mark.skipif(not SEQ_WEIGHTS.exists(), reason="no recurrent model trained")
+@pytest.mark.parametrize("seed,n_ch", [(0, 6), (1, 4), (2, 8)])
+def test_recurrent_step_matches_pytorch(seed: int, n_ch: int):
+    """One step of the GRU, forward and backward, against autograd.
+
+    The runtime never backpropagates through time — at 60 Hz the hidden state
+    is the past, and the past does not depend on the fader being moved now. So
+    only this single step has to be right, and if it is wrong the console pulls
+    in a direction nothing else would ever flag.
+    """
+    weights = json.loads(SEQ_WEIGHTS.read_text())
+    n_bands = weights["nBands"]
+    rng = np.random.default_rng(seed + 200)
+    P, g = _scene(rng, n_ch, n_bands)
+    a = np.ones(n_ch)
+    if seed % 2:
+        a[rng.integers(0, n_ch)] = 0.0
+    h0 = rng.normal(0, 0.4, size=weights["state"])
+    dShape = rng.normal(0, 1, size=n_bands)
+
+    js = _rec_js({"weights": weights, "P": P.tolist(), "g": g.tolist(),
+                  "a": a.tolist(), "h": h0.tolist(), "dShape": dShape.tolist()})
+
+    m = _torch_recurrent(weights)
+    Pt = torch.tensor(P, dtype=torch.float64).unsqueeze(0)
+    gt = torch.tensor(g[None, :], dtype=torch.float64, requires_grad=True)
+    at = torch.tensor(a, dtype=torch.float64).unsqueeze(0)
+    ht = torch.tensor(h0[None, :], dtype=torch.float64)
+    pred, _, h_new = m.step(Pt, gt, at, ht)
+    pred.backward(torch.tensor(dShape, dtype=torch.float64).unsqueeze(0))
+
+    assert np.allclose(js["shape"], pred.detach().numpy()[0], atol=1e-6), "forward diverges"
+    assert np.allclose(js["h"], h_new.detach().numpy()[0], atol=1e-6), "GRU state diverges"
+
+    want = gt.grad.numpy()[0]
+    got = np.asarray(js["dG"])
+    scale = max(float(np.abs(want).max()), 1e-9)
+    assert np.allclose(got, want, rtol=1e-5, atol=1e-6 * scale), (
+        f"gradient diverges\njs {got}\npy {want}"
+    )
+
+
+@pytest.mark.skipif(not SEQ_WEIGHTS.exists(), reason="no recurrent model trained")
+def test_hidden_state_actually_changes_the_prediction():
+    """If the state made no difference, the memory would be decoration."""
+    weights = json.loads(SEQ_WEIGHTS.read_text())
+    rng = np.random.default_rng(9)
+    P, g = _scene(rng, 6, weights["nBands"])
+    a = np.ones(6)
+    common = {"weights": weights, "P": P.tolist(), "g": g.tolist(), "a": a.tolist(),
+              "dShape": rng.normal(0, 1, size=weights["nBands"]).tolist()}
+
+    zero = _rec_js({**common, "h": [0.0] * weights["state"]})
+    warm = _rec_js({**common, "h": rng.normal(0, 0.6, size=weights["state"]).tolist()})
+    diff = np.abs(np.asarray(zero["shape"]) - np.asarray(warm["shape"])).max()
+    assert diff > 1e-3, f"the hidden state does nothing ({diff:.2e})"
+
+
+REC_FIELD_BRIDGE = """
+import { Scene } from %(field)s;
+import { RecurrentMix } from %(learned)s;
+const input = JSON.parse(await new Promise((res) => {
+  let s = ""; process.stdin.on("data", (d) => (s += d)); process.stdin.on("end", () => res(s));
+}));
+const P = input.P.map((r) => Float64Array.from(r));
+const scene = new Scene(input.spec, P);
+const model = new RecurrentMix(input.weights);
+model.h = Float64Array.from(input.h);   // a warm state, as at runtime
+scene.setPredictor(model);
+const g = Float64Array.from(input.g);
+const a = Float64Array.from(input.a);
+const anchor = input.anchor ? Float64Array.from(input.anchor) : null;
+const grad = Array.from(scene.gradient(g, a, anchor));
+const h = 1e-6, fd = [];
+for (let i = 0; i < g.length; i++) {
+  const gp = Float64Array.from(g), gm = Float64Array.from(g);
+  gp[i] += h; gm[i] -= h;
+  fd.push((scene.potential(gp, a, anchor).total - scene.potential(gm, a, anchor).total) / (2 * h));
+}
+process.stdout.write(JSON.stringify({ grad, fd }));
+"""
+
+
+@pytest.mark.skipif(not SEQ_WEIGHTS.exists(), reason="no recurrent model trained")
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_field_gradient_is_exact_with_the_recurrent_model(seed: int):
+    """The assembled field must still return −∂V/∂g with a GRU in the chain.
+
+    The hidden state is held fixed while differentiating, which is exactly what
+    happens on the console: the past is given, only the action varies. Finite
+    differences of the potential the console reads are the check.
+    """
+    weights = json.loads(SEQ_WEIGHTS.read_text())
+    spec = json.loads(SPEC.read_text())
+    rng = np.random.default_rng(seed + 300)
+    P, g = _scene(rng, 6, spec["bands"]["n"])
+    a = np.ones(6)
+    a[rng.integers(0, 6)] = 0.0
+    anchor = rng.uniform(0.3, 0.9, size=6)
+    h = rng.normal(0, 0.4, size=weights["state"])
+
+    script = REC_FIELD_BRIDGE % {"field": json.dumps((ROOT / "sonic_gravity" / "web" / "js" / "field.js").as_uri()),
+                                 "learned": json.dumps(LEARNED_JS.as_uri())}
+    proc = subprocess.run(["node", "--input-type=module", "-e", script],
+                          input=json.dumps({"spec": spec, "weights": weights, "P": P.tolist(),
+                                            "g": g.tolist(), "a": a.tolist(),
+                                            "anchor": anchor.tolist(), "h": h.tolist()}),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+
+    grad, fd = np.asarray(out["grad"]), np.asarray(out["fd"])
+    scale = max(float(np.abs(fd).max()), 1e-9)
+    assert np.allclose(grad, fd, rtol=2e-4, atol=2e-4 * scale), (
+        f"analytic {grad}\nfinite   {fd}"
+    )

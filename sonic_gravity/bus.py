@@ -107,12 +107,27 @@ def gain_reduction(x: np.ndarray, sr: float, comp: BusComp, block: int = 32) -> 
 
 
 def apply(x: np.ndarray, sr: float, comp: BusComp, block: int = 32) -> np.ndarray:
-    """Compress a mono signal."""
+    """Compress a mono signal.
+
+    The gain ramps linearly from the previous block's reduction to this one's,
+    across the block. A per-block step would put broadband clicks straight into
+    the spectrum being measured.
+
+    ⚠️ A ramp, not an interpolation between block CENTRES. Both are smooth, but
+    only the ramp can be reproduced by a real-time processor, which cannot see
+    the next block's reduction before computing this block. The browser mirror
+    (`web/js/buscomp.js`) has to match this exactly, so the reference is the
+    causal version.
+    """
     gr = gain_reduction(x, sr, comp, block)
-    # Linear interpolation back to sample rate: a per-block step would put
-    # broadband clicks into the very spectrum we are trying to measure.
-    centres = np.arange(len(gr)) * block + block / 2
-    gr_full = np.interp(np.arange(len(x)), centres, gr, left=gr[0], right=gr[-1])
+    n_blocks = len(gr)
+    gr_full = np.empty(len(x))
+    prev = 0.0
+    for n in range(n_blocks):
+        a, b = n * block, min((n + 1) * block, len(x))
+        gr_full[a:b] = np.linspace(prev, gr[n], b - a, endpoint=False)
+        prev = gr[n]
+    gr_full[n_blocks * block :] = prev
     return x * 10.0 ** ((gr_full + comp.makeup_db) / 20.0)
 
 

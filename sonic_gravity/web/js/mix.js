@@ -73,7 +73,30 @@ export class MixWorld {
     this.masterAnalyser = this.ctx.createAnalyser();
     this.masterAnalyser.fftSize = 2048;
     this.masterAnalyser.smoothingTimeConstant = 0.7;
-    this.master.connect(this.limiter);
+
+    // Multiband bus, on the audio thread. It sits between the summed mix and
+    // the limiter — exactly where `dataset_seq.py` puts it, so the browser's
+    // world matches the one the recurrent model was trained in. Without that,
+    // running the model here would be running it somewhere it has never been.
+    this.bus = null;
+    this.busGr = [0, 0, 0];
+    try {
+      await this.ctx.audioWorklet.addModule("js/bus-worklet.js");
+      this.bus = new AudioWorkletNode(this.ctx, "multiband-bus", {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+        processorOptions: { enabled: false, channels: 2 },
+      });
+      this.bus.port.onmessage = (e) => {
+        if (e.data?.type === "gr") this.busGr = e.data.gr;
+      };
+      this.master.connect(this.bus);
+      this.bus.connect(this.limiter);
+    } catch (err) {
+      // No worklet (old browser, insecure context): the demo still works, the
+      // bus simply is not available and the recurrent model stays off.
+      console.warn("multiband bus unavailable:", err);
+      this.master.connect(this.limiter);
+    }
     this.limiter.connect(this.masterAnalyser);
     this.masterAnalyser.connect(this.ctx.destination);
 
@@ -156,6 +179,14 @@ export class MixWorld {
       t.source = null;
     }
     this.started = false;
+  }
+
+  /** Active ou coupe le bus multibande (le monde du modèle récurrent). */
+  setBus(on) {
+    if (!this.bus) return false;
+    this.bus.port.postMessage({ type: "enable", value: !!on });
+    this.busOn = !!on;
+    return true;
   }
 
   /** Applique les positions de fader (0..1) au moteur audio. */

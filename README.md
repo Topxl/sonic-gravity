@@ -245,13 +245,13 @@ Six initialisation seeds on a fixed track split:
 | | MAE |
 |---|---|
 | analytic | 2.9948 dB |
-| memoryless | 1.5727 dB — +1.4221 from learning |
-| **recurrent** | **1.4526 dB** — **+0.1201 from memory** |
+| memoryless | 1.5762 dB — +1.4221 from learning |
+| **recurrent** | **1.4730 dB** — **+0.1032 from memory** |
 
-Per-seed memory gain: +0.140, +0.132, +0.085, +0.158, +0.103, +0.103 dB
-→ **+0.1201 ± 0.0113 dB (SE), t = 10.7**, 6/6 seeds positive.
+Per-seed memory gain: +0.140, +0.141, +0.090, +0.080, +0.075, +0.094 dB
+→ **+0.1032 ± 0.0121 dB (SE), t = 8.5**, 6/6 seeds positive.
 
-Memory is worth **7.6 %** on top of what learning already bought.
+Memory is worth **6.6 %** on top of what learning already bought.
 
 ### Four things that had to be fixed before that number appeared
 
@@ -286,22 +286,42 @@ Separating them — fixed split, varying initialisation — is what turned a coi
 flip into +0.1201 ± 0.0113 dB. A single-seed result here, in either
 direction, would have been noise reported as a finding.
 
-### Not wired into the demo, and why
+### Running it in the browser
 
-The browser's world has a wideband limiter *after* the measurement point, not a
-multiband bus. Switching this model on in the demo would run a model trained on
-one world inside a different one. Doing it honestly needs an AudioWorklet
-mirroring `bus.py` and a hand-written GRU step in JS — the backward pass is
-single-step (the hidden state is given at runtime, so no
-backpropagation-through-time), which is what makes it feasible at 60 fps at all.
+Both are wired in now, and they are tied together: ticking **Bus + mémoire**
+starts the multiband bus *and* switches to the recurrent model, because that is
+the world it learnt. Turning one on without the other would run a model
+somewhere it has never been.
 
-Until then this stands as a controlled experiment, reproducible with:
+- `buscomp.js` is the bus DSP, checked **sample for sample** against `bus.py`
+  (`tests/test_bus_parity.py`): static curve, Butterworth coefficients against
+  scipy, and the full chain at two audio block sizes. Block size is varied on
+  purpose — a mirror that quietly tied its detector to the audio block would
+  pass at one size and fail at the other.
+- `bus-worklet.js` runs it on the audio thread. Detection is mono, filtering is
+  per channel, so the stereo image does not wander when the bus works.
+- `RecurrentMix` in `learned.js` is the GRU step, forward and backward by hand,
+  checked against autograd — and the assembled field (GRU + level + masking +
+  anchor) is checked against finite differences of the potential the console
+  reads.
 
-```bash
-python -m sonic_gravity.dataset_seq --decompositions /path/to/stems --multiband
-python -m sonic_gravity.train_seq --data sonic_gravity/data/sequences_mb.npz --seeds 6
-```
+**Only one step is ever differentiated.** At runtime the question is "what if I
+move this fader *now*", so the hidden state is the past and does not depend on
+the action being considered. No backpropagation through time — which is the
+only reason a recurrent model fits inside a 60 Hz loop.
 
+Measured live with the bus and the recurrent model both on: **60 fps**, median
+frame 4.4 ms, p95 5.2 ms, worst 8.5 ms. The field still repairs a scrambled mix
+(V 19.2 → 0.98).
+
+Two things had to be aligned before the mirror agreed:
+
+1. **The detector runs on 32 samples, not on the audio block.** The worklet
+   hands over 128; a detector four times slower is a different compressor.
+2. **The gain ramps, it does not interpolate between block centres.** Both are
+   smooth, but only a ramp is causal — a real-time processor cannot see the next
+   block's reduction. The Python reference was changed to the causal form, and
+   the dataset regenerated, rather than letting the browser approximate it.
 
 ## What the analytic field does *not* capture
 

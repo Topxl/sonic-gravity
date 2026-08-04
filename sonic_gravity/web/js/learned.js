@@ -225,3 +225,219 @@ export class LearnedMix {
     return dG;
   }
 }
+
+
+/**
+ * RecurrentMix — the world model with a memory of what the bus is doing.
+ *
+ * ⚠️ Only ONE step is ever differentiated. On the console the question is "what
+ * happens if I move this fader *now*", so the hidden state is a given: it was
+ * produced by frames already played and does not depend on the action being
+ * considered. No backpropagation through time, which is the only reason a
+ * recurrent model is usable inside a 60 Hz loop at all.
+ *
+ * The state advances once per audio frame (`advance`), driven by what is
+ * actually playing — not once per gradient evaluation, of which there are
+ * hundreds per frame while drawing the field relief.
+ */
+
+/** σ(x), and its use in the GRU gates. */
+const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+
+export class RecurrentMix extends LearnedMix {
+  constructor(weights) {
+    super(weights);
+    if (weights.kind !== "recurrent") throw new Error("not a recurrent model");
+    this.stateSize = weights.state;
+    this.h = new Float64Array(weights.state);
+  }
+
+  static async load(url = "model_seq.json") {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`no recurrent model at ${url}`);
+    return new RecurrentMix(await res.json());
+  }
+
+  reset() {
+    this.h.fill(0);
+  }
+
+  /** Per-channel context and the baseline — shared by forward and advance. */
+  _encode(P, g, a) {
+    const { nBands, w } = this;
+    const n = P.length;
+    const M = new Float64Array(nBands).fill(EPS);
+    const u = new Float64Array(n);
+    const totals = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const ga = g[i] * (a ? a[i] : 1);
+      u[i] = ga === 0 ? 0 : Math.pow(ga, this.twoP);
+      const Pi = P[i];
+      let tot = 0;
+      for (let b = 0; b < nBands; b++) {
+        tot += Pi[b];
+        M[b] += u[i] * Pi[b];
+      }
+      totals[i] = tot;
+    }
+    let S = 0;
+    for (let b = 0; b < nBands; b++) S += M[b];
+    const baseN = new Float64Array(nBands);
+    for (let b = 0; b < nBands; b++) baseN[b] = DB * Math.log10(M[b] / S);
+    // Absolute level, /20 — what a compressor threshold acts on. Mirrors
+    // `RecurrentMixModel.step`; without it the model cannot know how much the
+    // bus is reducing.
+    const level = (DB * Math.log10(S)) / 20;
+
+    const feats = [], z1 = [], h1 = [], z2 = [], h2 = [];
+    const pooled = new Float64Array(w.width);
+    let present = 0;
+    for (let i = 0; i < n; i++) {
+      const f = new Float64Array(nBands + 2);
+      const inv = 1 / Math.max(totals[i], EPS);
+      for (let b = 0; b < nBands; b++) f[b] = Math.log10(P[i][b] * inv + EPS);
+      f[nBands] = g[i];
+      f[nBands + 1] = Math.log10(totals[i] + EPS) / 10;
+      feats.push(f);
+      const a1 = dense(w.enc[0].W, w.enc[0].b, f);
+      const o1 = new Float64Array(a1.length);
+      for (let k = 0; k < a1.length; k++) o1[k] = silu(a1[k]);
+      const a2 = dense(w.enc[1].W, w.enc[1].b, o1);
+      const o2 = new Float64Array(a2.length);
+      for (let k = 0; k < a2.length; k++) o2[k] = silu(a2[k]);
+      z1.push(a1); h1.push(o1); z2.push(a2); h2.push(o2);
+      if (!a || a[i]) {
+        present++;
+        for (let k = 0; k < o2.length; k++) pooled[k] += o2[k];
+      }
+    }
+    const denom = Math.max(present, 1);
+    for (let k = 0; k < pooled.length; k++) pooled[k] /= denom;
+
+    // x = [ctx, baseN/10, level] — the GRU input and part of the decoder's.
+    const x = new Float64Array(w.width + nBands + 1);
+    x.set(pooled, 0);
+    for (let b = 0; b < nBands; b++) x[w.width + b] = baseN[b] / 10;
+    x[w.width + nBands] = level;
+
+    return { M, S, u, totals, baseN, feats, z1, h1, z2, h2, present: denom, x, n };
+  }
+
+  /** One GRU cell step. Returns the new state and everything its backward needs. */
+  _gru(x, hPrev) {
+    const { Wih, Whh, bih, bhh } = this.w.gru;
+    const S = this.stateSize;
+    const gi = dense(Wih, bih, x); // 3S
+    const gh = dense(Whh, bhh, hPrev); // 3S
+    const r = new Float64Array(S);
+    const z = new Float64Array(S);
+    const nCand = new Float64Array(S);
+    const h = new Float64Array(S);
+    for (let k = 0; k < S; k++) {
+      r[k] = sigmoid(gi[k] + gh[k]);
+      z[k] = sigmoid(gi[S + k] + gh[S + k]);
+      // PyTorch's GRUCell puts the reset gate INSIDE the hidden contribution.
+      nCand[k] = Math.tanh(gi[2 * S + k] + r[k] * gh[2 * S + k]);
+      h[k] = (1 - z[k]) * nCand[k] + z[k] * hPrev[k];
+    }
+    return { h, r, z, nCand, gh, hPrev };
+  }
+
+  /** Predict the mix shape for a candidate fader position, state held fixed. */
+  forward(P, g, a) {
+    const enc = this._encode(P, g, a);
+    const gru = this._gru(enc.x, this.h);
+    const { w, nBands } = this;
+
+    const decIn = new Float64Array(this.stateSize + enc.x.length);
+    decIn.set(gru.h, 0);
+    decIn.set(enc.x, this.stateSize);
+
+    const z3 = dense(w.dec[0].W, w.dec[0].b, decIn);
+    const d1 = new Float64Array(z3.length);
+    for (let k = 0; k < z3.length; k++) d1[k] = silu(z3[k]);
+    const z4 = dense(w.dec[1].W, w.dec[1].b, d1);
+    const d2 = new Float64Array(z4.length);
+    for (let k = 0; k < z4.length; k++) d2[k] = silu(z4[k]);
+    const delta = dense(w.dec[2].W, w.dec[2].b, d2);
+
+    const shape = new Float64Array(nBands);
+    for (let b = 0; b < nBands; b++) shape[b] = enc.baseN[b] + delta[b];
+
+    return { shape, cache: { ...enc, P, g, a, gru, decIn, z3, d1, z4, d2 } };
+  }
+
+  /** Advance the memory using what is actually playing. Call once per frame. */
+  advance(P, g, a) {
+    const enc = this._encode(P, g, a);
+    this.h = this._gru(enc.x, this.h).h;
+    return this.h;
+  }
+
+  /**
+   * ∂V/∂g through one step. The hidden state is treated as constant — it is
+   * the past, and the past does not depend on what the hand does next.
+   */
+  backward(cache, dShape) {
+    const { nBands, w, twoP, stateSize: S } = this;
+    const { P, g, a, n, M, S: total, totals, feats, z1, h1, z2, gru, z3, d1, z4, d2, present } = cache;
+
+    const dD2 = denseBackward(w.dec[2].W, dShape, d2.length);
+    for (let k = 0; k < dD2.length; k++) dD2[k] *= dsilu(z4[k]);
+    const dD1 = denseBackward(w.dec[1].W, dD2, d1.length);
+    for (let k = 0; k < dD1.length; k++) dD1[k] *= dsilu(z3[k]);
+    const dDecIn = denseBackward(w.dec[0].W, dD1, S + w.width + nBands + 1);
+
+    // Decoder → GRU output, then GRU → its input x.
+    const dH = dDecIn.subarray(0, S);
+    const dX = new Float64Array(w.width + nBands + 1);
+    for (let k = 0; k < dX.length; k++) dX[k] = dDecIn[S + k];
+
+    // GRU backward, w.r.t. x only (hPrev is a constant here).
+    const { r, z, nCand, gh, hPrev } = gru;
+    const dGi = new Float64Array(3 * S);
+    for (let k = 0; k < S; k++) {
+      const dh = dH[k];
+      const dN = dh * (1 - z[k]) * (1 - nCand[k] * nCand[k]);
+      const dZ = dh * (hPrev[k] - nCand[k]) * z[k] * (1 - z[k]);
+      const dR = dN * gh[2 * S + k] * r[k] * (1 - r[k]);
+      dGi[k] = dR;
+      dGi[S + k] = dZ;
+      dGi[2 * S + k] = dN;
+    }
+    const dXfromGru = denseBackward(w.gru.Wih, dGi, dX.length);
+    for (let k = 0; k < dX.length; k++) dX[k] += dXfromGru[k];
+
+    // x = [pooled, baseN/10, level] → split the gradient back out.
+    const dPooled = dX.subarray(0, w.width);
+    const dBaseN = new Float64Array(nBands);
+    for (let b = 0; b < nBands; b++) dBaseN[b] = dShape[b] + dX[w.width + b] / 10;
+    const dLevel = dX[w.width + nBands] / 20;
+
+    const dG = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      if (a && !a[i]) continue;
+      const dH2 = new Float64Array(w.width);
+      for (let k = 0; k < w.width; k++) dH2[k] = (dPooled[k] / present) * dsilu(z2[i][k]);
+      const dH1 = denseBackward(w.enc[1].W, dH2, h1[i].length);
+      for (let k = 0; k < dH1.length; k++) dH1[k] *= dsilu(z1[i][k]);
+      const dFeat = denseBackward(w.enc[0].W, dH1, feats[i].length);
+      dG[i] += dFeat[nBands];
+    }
+
+    // Baseline path: baseN[b] = 10·log10(M[b]/S), plus the absolute level.
+    let dSum = 0;
+    for (let b = 0; b < nBands; b++) dSum += dBaseN[b];
+    for (let i = 0; i < n; i++) {
+      const ai = a ? a[i] : 1;
+      if (!ai) continue;
+      const Pi = P[i];
+      let acc = 0;
+      for (let b = 0; b < nBands; b++) acc += (dBaseN[b] * Pi[b]) / M[b];
+      let dV_du = DB_SCALE * (acc - (dSum * totals[i]) / total);
+      dV_du += (dLevel * DB_SCALE * totals[i]) / total;
+      dG[i] += dV_du * twoP * ai * Math.pow(Math.max(g[i], 1e-12), twoP - 1);
+    }
+    return dG;
+  }
+}

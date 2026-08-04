@@ -8,7 +8,7 @@
  */
 
 import { Scene } from "./field.js";
-import { LearnedMix } from "./learned.js";
+import { LearnedMix, RecurrentMix } from "./learned.js";
 import { MixWorld } from "./mix.js";
 import { Haptics, MotorFader, normalizeForce } from "./motor.js";
 import { VirtualSurface } from "./surface.js";
@@ -68,6 +68,10 @@ class App {
     /** Learned mix model, or null while only the analytic field is available. */
     this.learned = null;
     this.useLearned = false;
+    /** Recurrent model + its world. The two go together: the model only makes
+     * sense while the multiband bus is running, because that is what it learnt. */
+    this.recurrent = null;
+    this.busOn = false;
   }
 
   async boot() {
@@ -113,6 +117,23 @@ class App {
       document.getElementById("learned-wrap").hidden = true;
     }
 
+    try {
+      this.recurrent = await RecurrentMix.load();
+      const r = this.recurrent.report;
+      const wrap = document.getElementById("bus-wrap");
+      if (this.mix.bus && r) {
+        wrap.title =
+          `Bus multibande + modèle à mémoire : ${r.recurrent_mae_db.toFixed(3)} dB ` +
+          `contre ${r.memoryless_mae_db.toFixed(3)} sans mémoire ` +
+          `(+${r.gain_from_memory_db.toFixed(3)} dB, t = ${r.t_stat_memory.toFixed(1)})`;
+      } else {
+        wrap.hidden = true;
+      }
+    } catch {
+      const w = document.getElementById("bus-wrap");
+      if (w) w.hidden = true;
+    }
+
     this.bindUi();
     this.surface.render();
     requestAnimationFrame((t) => this.frame(t));
@@ -149,6 +170,17 @@ class App {
       // magnitudes and the force scale would otherwise carry over.
       this.scaler = new ForceScaler();
     });
+    const bus = document.getElementById("bus");
+    if (bus) {
+      bus.addEventListener("change", (e) => {
+        this.busOn = e.target.checked && this.mix.setBus(e.target.checked);
+        // The model follows the world: with the bus on, the recurrent model is
+        // the one that was trained here. Switching one without the other would
+        // run a model somewhere it has never been.
+        if (this.busOn && this.recurrent) this.recurrent.reset();
+        this.scaler = new ForceScaler();
+      });
+    }
     document.getElementById("scramble").addEventListener("click", () => this.scramble());
     document.getElementById("release").addEventListener("click", () => this.releaseAll());
   }
@@ -262,7 +294,14 @@ class App {
       // paire : ~1 300 opérations pour six tranches, négligeable, et c'est ce
       // qui rend les centaines d'évaluations du relief quasi gratuites.
       this.scene = new Scene(this.spec, this.mix.P);
-      if (this.useLearned && this.learned) this.scene.setPredictor(this.learned);
+      const model = this.busOn && this.recurrent ? this.recurrent : this.learned;
+      if (this.useLearned && model) {
+        this.scene.setPredictor(model);
+        // Advance the memory ONCE per frame, from what is actually playing —
+        // not once per gradient evaluation, of which there are hundreds while
+        // drawing the field relief.
+        if (model === this.recurrent) model.advance(this.mix.P, this.gains, this.audible);
+      }
     }
 
     if (this.scene) {
