@@ -122,6 +122,9 @@ export class Scene {
     this.wAnchor = spec.weights.anchor ?? 0;
     this.anchorSigma = spec.weights.anchorSigma ?? 0.25;
     this.tiltHuber = spec.weights.tiltHuber ?? 3.0;
+    // Loi de fader : amplitude = g^p, donc puissance = g^(2p). Partagée avec
+    // le moteur audio via spec.json — les deux ont déjà divergé une fois.
+    this.twoP = 2 * (spec.faderExponent ?? 1);
 
     // Énergie totale et forme spectrale de chaque tranche (sans gain).
     this.total = new Float64Array(this.n);
@@ -182,6 +185,36 @@ export class Scene {
     this._dVdM = new Float64Array(this.nBands);
     this._grad = new Float64Array(this.n);
     this._dmask = new Float64Array(this.n);
+    this._sdb = new Float64Array(this.nBands);
+    this._dShape = new Float64Array(this.nBands);
+
+    /** Learned world model, or null for the closed-form baseline.
+     * Only the SHAPE of the spectrum goes through it: level stays analytic
+     * (it is the master's business) and masking reads the per-channel shapes,
+     * which no fader can change. */
+    this.predictor = null;
+  }
+
+  /** Swap the mix model. `null` restores the analytic field exactly. */
+  setPredictor(p) {
+    this.predictor = p;
+  }
+
+  /**
+   * Spectrum shape in dB, from whichever model is active — plus everything the
+   * derivative will need afterwards.
+   */
+  _shape(g, a) {
+    const M = this._mix(g, a);
+    let S = 0;
+    for (let b = 0; b < this.nBands; b++) S += M[b];
+    if (this.predictor) {
+      const out = this.predictor.forward(this.P, g, a);
+      return { shape: out.shape, cache: out.cache, M, S };
+    }
+    const sdb = this._sdb;
+    for (let b = 0; b < this.nBands; b++) sdb[b] = DB_VALUE * Math.log10(M[b] / S);
+    return { shape: sdb, cache: null, M, S };
   }
 
   /** Mix par bande : M[b] = Σ (g·a)² P[i][b]. */
@@ -190,7 +223,7 @@ export class Scene {
     M.fill(EPS);
     for (let i = 0; i < n; i++) {
       const ga = g[i] * (a ? a[i] : 1);
-      u[i] = ga * ga;
+      u[i] = ga === 0 ? 0 : Math.pow(ga, this.twoP);
       if (u[i] === 0) continue;
       const Pi = P[i];
       const ui = u[i];
@@ -231,15 +264,12 @@ export class Scene {
    * @param {Float64Array} anchor positions posées par la main (rappel), ou null
    */
   potential(g, a, anchor) {
-    const M = this._mix(g, a);
     const { nBands, targetDb, sigmaDb } = this;
-    let S = 0;
-    for (let b = 0; b < nBands; b++) S += M[b];
+    const { shape, M, S } = this._shape(g, a);
 
     let tilt = 0;
     for (let b = 0; b < nBands; b++) {
-      const sdb = DB_VALUE * Math.log10(M[b] / S);
-      const d = (sdb - targetDb[b]) / sigmaDb[b];
+      const d = (shape[b] - targetDb[b]) / sigmaDb[b];
       tilt += this.wEff[b] * huber(d, this.tiltHuber);
     }
     tilt /= nBands;
@@ -271,25 +301,34 @@ export class Scene {
 
   /** dV/dg, dérivé à la main (démonstration et vérification dans field.py). */
   gradient(g, a, anchor) {
-    const M = this._mix(g, a);
-    const { nBands, n, targetDb, sigmaDb, _c: c, _dVdM: dVdM, _grad: grad, P, total } = this;
+    const { nBands, n, targetDb, sigmaDb, _c: c, _dVdM: dVdM, _grad: grad,
+            _dShape: dShape, P, total } = this;
+    const { shape, cache, M, S } = this._shape(g, a);
 
-    let S = 0;
-    for (let b = 0; b < nBands; b++) S += M[b];
-
+    // ∂V_tilt/∂shape — identical whichever model produced `shape`.
     let cSum = 0;
     for (let b = 0; b < nBands; b++) {
-      const sdb = DB_VALUE * Math.log10(M[b] / S);
-      const d = (sdb - targetDb[b]) / sigmaDb[b];
+      const d = (shape[b] - targetDb[b]) / sigmaDb[b];
       c[b] = ((1 / nBands) * this.wEff[b] * dhuber(d, this.tiltHuber)) / sigmaDb[b];
       cSum += c[b];
+      dShape[b] = this.wTilt * c[b];
     }
 
     const level = DB_VALUE * Math.log10(S);
     const dLevel = ((2 * (level - this.levelDb)) / (this.levelSigma * this.levelSigma)) * (DB_SCALE / S);
 
-    for (let b = 0; b < nBands; b++) {
-      dVdM[b] = this.wTilt * DB_SCALE * (c[b] / M[b] - cSum / S) + this.wLevel * dLevel;
+    // The tilt term reaches the faders through the model when one is active,
+    // and in closed form otherwise. Level and masking are analytic either way:
+    // level is the master's business, and masking reads per-channel shapes,
+    // which no fader can change.
+    let dGshape = null;
+    if (cache) {
+      dGshape = this.predictor.backward(cache, dShape);
+      for (let b = 0; b < nBands; b++) dVdM[b] = this.wLevel * dLevel;
+    } else {
+      for (let b = 0; b < nBands; b++) {
+        dVdM[b] = this.wTilt * DB_SCALE * (c[b] / M[b] - cSum / S) + this.wLevel * dLevel;
+      }
     }
 
     this._mask(this._u, true);
@@ -300,7 +339,9 @@ export class Scene {
       let dV_du = 0;
       for (let b = 0; b < nBands; b++) dV_du += Pi[b] * dVdM[b];
       dV_du += this.wMask * this._dmask[i] * total[i];
-      grad[i] = dV_du * (2 * g[i] * ai * ai);
+      // d/dg de (g·a)^(2p) = 2p·a·g^(2p−1), car a vaut 0 ou 1.
+      grad[i] = dV_du * (this.twoP * ai * Math.pow(Math.max(g[i], 1e-12), this.twoP - 1));
+      if (dGshape) grad[i] += dGshape[i];
       if (anchor && this.wAnchor) {
         grad[i] += (this.wAnchor * 2 * (g[i] - anchor[i])) / (this.anchorSigma * this.anchorSigma);
       }

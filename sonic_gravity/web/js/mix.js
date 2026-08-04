@@ -36,6 +36,7 @@ const FLOOR_MARGIN = 8; // combien de fois le plancher théorique avant d'y croi
 export class MixWorld {
   constructor(spec) {
     this.spec = spec;
+    this.faderExponent = spec.faderExponent ?? 1;
     this.ctx = null;
     this.tracks = [];
     this.started = false;
@@ -162,10 +163,11 @@ export class MixWorld {
     const now = this.ctx.currentTime;
     for (let i = 0; i < this.tracks.length; i++) {
       const t = this.tracks[i];
-      // Loi de fader : le carré donne une progression bien plus naturelle à
-      // l'oreille qu'un gain linéaire, et c'est la même puissance que celle
-      // dont le champ tient compte (M = Σ g²·P).
-      const g = audible[i] ? values[i] * values[i] : 0;
+      // Loi de fader lue dans spec.json, JAMAIS écrite en dur : c'est la même
+      // constante que celle dont le champ tire son gradient. Le jour où elles
+      // ont divergé (moteur en g², champ en g), le champ décrivait un mix que
+      // personne n'entendait, sans qu'aucun test ne bronche.
+      const g = audible[i] ? Math.pow(values[i], this.faderExponent) : 0;
       // Rampe courte : sans elle, un fader poussé à 60 Hz produit un escalier
       // de gains audible en zipper noise.
       t.gain.gain.setTargetAtTime(g, now, 0.012);

@@ -140,5 +140,7 @@
   "analysis": {
     "fftSize": 8192,
     "_comment": "8192 : a 48 kHz un bin fait 5,9 Hz, sous la largeur de la bande la plus grave (7,2 Hz). Une FFT plus courte laisse des bandes vides ; une plus longue rend le champ mou (fenetre > 340 ms)."
-  }
+  },
+  "faderExponent": 2.0,
+  "_faderComment": "Loi de fader : amplitude = g^faderExponent, donc PUISSANCE = g^(2*faderExponent). Constante partagee par le moteur audio (mix.js) et par le champ (field.py / field.js). Elles ont diverge le 2026-08-04 : le moteur appliquait g^2 en amplitude (puissance g^4) pendant que le champ supposait une puissance en g^2. Le champ decrivait donc un mix que personne n'entendait -- aucune erreur visible, juste un gradient cale sur le mauvais monde."
 }

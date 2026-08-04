@@ -10,3 +10,8 @@ sonic_gravity/traces/
 
 # Scenes built from your own stems (`prepare_demo.py`) may contain third-party
 # audio. The committed scene is the synthetic one from `make_demo_scene.py`.
+
+# Training data derived from commercial recordings. Band-level spectra cannot
+# reconstruct audio, but the set is large and not ours to redistribute — the
+# trained weights are committed instead, and `dataset.py` rebuilds it.
+sonic_gravity/data/

@@ -8,12 +8,19 @@
  */
 
 import { Scene } from "./field.js";
+import { LearnedMix } from "./learned.js";
 import { MixWorld } from "./mix.js";
 import { Haptics, MotorFader, normalizeForce } from "./motor.js";
 import { VirtualSurface } from "./surface.js";
 
-const PROFILE_HZ = 12; // le relief du champ n'a pas besoin des 60 Hz de l'écran
+// Le relief du champ n'a pas besoin des 60 Hz de l'écran. Il est en revanche
+// calculé UNE TRANCHE PAR IMAGE, en rotation, plutôt que toutes d'un coup :
+// avec le modèle appris, les six reliefs coûtent 12 ms — les trois quarts
+// d'une image à 60 Hz, soit une saccade visible à chaque rafraîchissement.
+// Étalé, chaque image en porte 1/n et l'à-coup disparaît, pour la même
+// fraîcheur perçue (~10 Hz par tranche à six tranches).
 const PROFILE_STEPS = 36;
+const PROFILE_STEPS_LEARNED = 24; // le réseau coûte ~100× la formule fermée
 
 /**
  * Met la force du champ à une échelle utilisable par un moteur.
@@ -55,9 +62,12 @@ class App {
     this.running = false;
     this.gravityOn = true;
     this.lastFrame = 0;
-    this.lastProfile = 0;
+    this.profileCursor = 0;
     this.scene = null;
     this.parts = null;
+    /** Learned mix model, or null while only the analytic field is available. */
+    this.learned = null;
+    this.useLearned = false;
   }
 
   async boot() {
@@ -87,6 +97,22 @@ class App {
       ? `gabarit mesuré sur ${this.spec.target.nTracks} morceaux`
       : "gabarit par défaut (non mesuré)";
 
+    // The model is optional: the page must work without it, because the
+    // analytic field is a complete system on its own and the repository ships
+    // usable without a training run.
+    try {
+      this.learned = await LearnedMix.load();
+      const r = this.learned.report;
+      const wrap = document.getElementById("learned-wrap");
+      if (r) {
+        wrap.title =
+          `MAE ${r.model_mae_db.toFixed(3)} dB contre ${r.baseline_debiased_mae_db.toFixed(3)} ` +
+          `pour la formule (${r.improvement_pct.toFixed(1)} % de mieux sur des morceaux inédits)`;
+      }
+    } catch {
+      document.getElementById("learned-wrap").hidden = true;
+    }
+
     this.bindUi();
     this.surface.render();
     requestAnimationFrame((t) => this.frame(t));
@@ -114,6 +140,14 @@ class App {
       this.spec.weights.anchor = this.anchorBase * (1 - f);
       document.getElementById("freedom-val").textContent =
         f === 0 ? "tenue" : f >= 0.99 ? "libre" : `${e.target.value} %`;
+    });
+    const learned = document.getElementById("learned");
+    learned.addEventListener("change", (e) => {
+      this.useLearned = e.target.checked && !!this.learned;
+      // The scene is rebuilt every frame, so the swap takes effect on the next
+      // one; `scaler` is reset because the two fields have different gradient
+      // magnitudes and the force scale would otherwise carry over.
+      this.scaler = new ForceScaler();
     });
     document.getElementById("scramble").addEventListener("click", () => this.scramble());
     document.getElementById("release").addEventListener("click", () => this.releaseAll());
@@ -228,6 +262,7 @@ class App {
       // paire : ~1 300 opérations pour six tranches, négligeable, et c'est ce
       // qui rend les centaines d'évaluations du relief quasi gratuites.
       this.scene = new Scene(this.spec, this.mix.P);
+      if (this.useLearned && this.learned) this.scene.setPredictor(this.learned);
     }
 
     if (this.scene) {
@@ -247,10 +282,7 @@ class App {
       }
       this.mix.applyGains(this.gains, this.audible);
 
-      if (now - this.lastProfile > 1000 / PROFILE_HZ) {
-        this.lastProfile = now;
-        this.updateProfiles();
-      }
+      this.updateProfiles();
       this.updateReadout();
     }
 
@@ -276,14 +308,19 @@ class App {
     document.getElementById("v-level").title = `cible calée à ${at.levelDb.toFixed(1)} dB`;
   }
 
-  /** Relief du potentiel le long de chaque course, normalisé pour l'affichage. */
-  updateProfiles() {
-    for (let i = 0; i < this.n; i++) {
+  /** Relief du potentiel le long d'UNE course par image, en rotation. */
+  updateProfiles(all = false) {
+    const steps = this.useLearned ? PROFILE_STEPS_LEARNED : PROFILE_STEPS;
+    const first = all ? 0 : this.profileCursor % this.n;
+    const last = all ? this.n - 1 : first;
+    this.profileCursor = (first + 1) % this.n;
+
+    for (let i = first; i <= last; i++) {
       if (!this.audible[i]) {
         this.surface.setFieldProfile(i, null);
         continue;
       }
-      const p = this.scene.profile(i, this.gains, this.audible, this.anchor, PROFILE_STEPS);
+      const p = this.scene.profile(i, this.gains, this.audible, this.anchor, steps);
       // Normalisation sur un QUANTILE, pas sur le maximum. Couper un fader
       // coûte énormément, donc le maximum est toujours la butée basse : la
       // ramener à 1 écrasait toute la variation utile, et une vallée large et

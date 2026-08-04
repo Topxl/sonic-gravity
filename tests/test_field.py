@@ -349,3 +349,44 @@ def test_a_missing_band_cannot_dominate_the_potential():
     assert total < 12, f"un break domine encore le champ : V={total:.1f}"
     # Et la force reste bornée : pas de panique sur les faders muets.
     assert np.abs(field.force(P, g)).max() < 1e3
+
+
+# ── Loi de fader : une seule, partagée par le moteur audio et le champ ──────
+
+
+def test_fader_law_is_shared_and_not_hardcoded_in_the_audio_engine():
+    """Régression du 2026-08-04.
+
+    Le moteur audio appliquait un gain d'AMPLITUDE de g² — donc une puissance
+    en g⁴ — pendant que le champ supposait une puissance en g². Le champ
+    décrivait un mix que personne n'entendait : aucune erreur, aucun test rouge,
+    juste un gradient calé sur le mauvais monde. Un commentaire affirmait même
+    que les deux étaient d'accord.
+
+    La loi vit donc dans `spec.json` et nulle part ailleurs.
+    """
+    d = json.loads(SPEC_PATH.read_text())
+    assert "faderExponent" in d, "la loi de fader doit être dans spec.json"
+
+    mix_js = (SPEC_PATH.parent / "web" / "js" / "mix.js").read_text()
+    assert "spec.faderExponent" in mix_js, "mix.js doit lire la loi depuis spec.json"
+    # Le produit littéral `values[i] * values[i]` est précisément la forme qui
+    # avait figé la loi dans le moteur.
+    assert "values[i] * values[i]" not in mix_js, "loi de fader ré-écrite en dur dans mix.js"
+
+
+@pytest.mark.parametrize("exponent", [0.5, 1.0, 2.0, 3.0])
+def test_gradient_stays_exact_for_any_fader_law(exponent: float):
+    """Le gradient doit rester le vrai gradient quelle que soit la loi choisie."""
+    spec = load_spec()
+    spec.fader_exponent = exponent
+    field = Field(spec)
+    rng = np.random.default_rng(int(exponent * 100))
+    P, g = _random_scene(rng)
+
+    got = field.gradient(P, g)
+    want = _finite_diff(field, P, g, None)
+    scale = max(float(np.abs(want).max()), 1e-9)
+    assert np.allclose(got, want, rtol=1e-4, atol=1e-4 * scale), (
+        f"exposant {exponent} : analytique {got}\nfinies {want}"
+    )

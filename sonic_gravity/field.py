@@ -10,7 +10,7 @@ Le modèle
 Chaque tranche `i` est mesurée PRÉ-fader : `P[i, b]` = puissance de la tranche
 dans la bande `b`, indépendante de son gain. Le mix vaut alors
 
-    M[b] = somme_i (g_i · a_i)² · P[i, b]
+    M[b] = somme_i (g_i · a_i)^(2·p) · P[i, b]     avec p = spec.faderExponent
 
 avec `g_i` le fader (0..1) et `a_i` l'audibilité (0 si coupée, ou tue par un
 solo ailleurs). ⚠️ C'est une approximation à **phases décorrélées** : deux
@@ -167,6 +167,7 @@ class Spec:
     w_anchor: float
     anchor_sigma: float
     tilt_huber: float
+    fader_exponent: float
     fitted: bool
     n_tracks: int
 
@@ -192,6 +193,7 @@ def load_spec(path: pathlib.Path | None = None) -> Spec:
         w_tilt=float(w["tilt"]), w_mask=float(w["mask"]), w_level=float(w["level"]),
         w_anchor=float(w.get("anchor", 0.0)), anchor_sigma=float(w.get("anchorSigma", 0.25)),
         tilt_huber=float(w.get("tiltHuber", 3.0)),
+        fader_exponent=float(d.get("faderExponent", 1.0)),
         fitted=bool(t.get("fitted", False)), n_tracks=int(t.get("nTracks", 0)),
     )
 
@@ -222,7 +224,10 @@ class Field:
         g = np.asarray(g, dtype=np.float64)
         a = np.ones(len(g)) if audible is None else np.asarray(audible, dtype=np.float64)
 
-        u = (g * a) ** 2  # contribution en puissance de chaque tranche
+        # Contribution en puissance : la loi de fader agit sur l'AMPLITUDE
+        # (g^p), donc la puissance suit g^(2p). Confondre les deux fait décrire
+        # au champ un mix que le moteur audio ne produit pas.
+        u = (g * a) ** (2.0 * s.fader_exponent)
         M = u @ P + EPS  # (n_bands,) mix
         S = float(M.sum())
 
@@ -327,8 +332,10 @@ class Field:
         g = np.asarray(g, dtype=np.float64)
         a = np.ones(len(g)) if audible is None else np.asarray(audible, dtype=np.float64)
 
-        u = (g * a) ** 2
-        du_dg = 2.0 * g * a**2  # du_i/dg_i
+        two_p = 2.0 * s.fader_exponent
+        u = (g * a) ** two_p
+        # d/dg de (g·a)^(2p) = 2p·a^(2p)·g^(2p−1) ; a vaut 0 ou 1 donc a^(2p) = a.
+        du_dg = two_p * a * np.power(np.maximum(g, 1e-12), two_p - 1.0)
         M = u @ P + EPS
         S = float(M.sum())
 
