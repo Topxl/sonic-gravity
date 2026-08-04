@@ -220,6 +220,89 @@ itself is learned, which is what modelling compressor dynamics through time
 would require.
 
 
+
+## Adding memory: does the past actually help?
+
+The model above is per-frame. Compression, pumping — anything depending on the
+recent past — is invisible to it. So: give the world a memory, give the model a
+memory, and measure whether that buys anything.
+
+**The world gets a bus compressor** (`bus.py`). Gain reduction depends on what
+the signal did milliseconds ago, so the same fader position sounds different
+depending on how it was reached, and lowering one channel changes the reduction
+— hence every other channel's contribution. The faders stop being independent.
+
+**The model gets a GRU** whose hidden state carries what the bus is doing.
+Everything else is unchanged. The claim is tested against *the same network with
+its state re-zeroed every frame*: identical parameters, identical capacity, no
+access to the past. Comparing against the analytic baseline instead would let
+extra capacity pass for temporal modelling.
+
+### Result
+
+Six initialisation seeds on a fixed track split:
+
+| | MAE |
+|---|---|
+| analytic | 2.9948 dB |
+| memoryless | 1.5727 dB — +1.4221 from learning |
+| **recurrent** | **1.4526 dB** — **+0.1201 from memory** |
+
+Per-seed memory gain: +0.140, +0.132, +0.085, +0.158, +0.103, +0.103 dB
+→ **+0.1201 ± 0.0113 dB (SE), t = 10.7**, 6/6 seeds positive.
+
+Memory is worth **7.6 %** on top of what learning already bought.
+
+### Four things that had to be fixed before that number appeared
+
+Every one of them produced a *negative* result first, and each looked like
+"memory doesn't help" rather than "the experiment is wrong":
+
+1. **The analysis window was longer than the compressor's release** (186 ms vs
+   150 ms). The bus state was fully observable in the current frame, so there
+   was nothing to remember. A system is only worth a recurrent model where it is
+   *partially* observable at the observation scale.
+2. **Truncated BPTT started from a zeroed state mid-sequence.** The model was
+   trained to cope with a state that was simply wrong, which *penalised* having
+   memory at all (recurrent worse than memoryless, t = −16.5). Fixed with a
+   warm-up window excluded from the loss.
+3. **A wideband compressor moves the LEVEL, not the shape** — measured: −18 dB
+   of level against 0.157 dB of shape. The potential consumes only the shape, so
+   the effect being hunted was six times smaller than the model's own error. A
+   three-band bus changes the shape by 2.78 dB, and each band's reduction
+   follows its own history.
+4. **The model never saw the absolute level.** A compressor's threshold is in
+   dB, and every other input was shape-normalised. Without that one number no
+   model can predict how much it reduces.
+
+### And the trap that nearly produced a false negative
+
+The first clean run said memory was worthless (−0.054 dB). Two other seeds said
+the opposite (+0.155, +0.050). The seed controlled **both** the network
+initialisation **and** the train/test split, so two sources of variance were
+confounded, and the spread was larger than the effect.
+
+Separating them — fixed split, varying initialisation — is what turned a coin
+flip into +0.1201 ± 0.0113 dB. A single-seed result here, in either
+direction, would have been noise reported as a finding.
+
+### Not wired into the demo, and why
+
+The browser's world has a wideband limiter *after* the measurement point, not a
+multiband bus. Switching this model on in the demo would run a model trained on
+one world inside a different one. Doing it honestly needs an AudioWorklet
+mirroring `bus.py` and a hand-written GRU step in JS — the backward pass is
+single-step (the hidden state is given at runtime, so no
+backpropagation-through-time), which is what makes it feasible at 60 fps at all.
+
+Until then this stands as a controlled experiment, reproducible with:
+
+```bash
+python -m sonic_gravity.dataset_seq --decompositions /path/to/stems --multiband
+python -m sonic_gravity.train_seq --data sonic_gravity/data/sequences_mb.npz --seeds 6
+```
+
+
 ## What the analytic field does *not* capture
 
 The central approximation is `M[b] = Σ g²·P[i,b]`, i.e. **decorrelated phases**.
@@ -284,6 +367,9 @@ is documented at the site of its fix:
 | `sonic_gravity/model.py` | The residual deep-sets model (PyTorch, training only) |
 | `sonic_gravity/train.py` | Training with track-level splits, bias-corrected reference, ablation control |
 | `sonic_gravity/web/js/learned.js` | The model at runtime — forward and backward by hand |
+| `sonic_gravity/bus.py` | Bus compressor, wideband and multiband — what gives the world a memory |
+| `sonic_gravity/dataset_seq.py` | Fader trajectories through a compressed bus |
+| `sonic_gravity/train_seq.py` | Recurrent vs memoryless, averaged over seeds on a fixed split |
 
 ## Moving to hardware
 
@@ -299,11 +385,14 @@ on-screen demo can only approximate.
 
 ## Not done yet
 
-- **Temporal dynamics.** The model predicts the mix spectrum for a *given*
-  fader position; it has no memory. Compressor attack and release, pumping, and
-  anything else that depends on the recent past need a recurrent latent and a
-  `(zₜ, aₜ) → ẑₜ₊₁` predictor over time — and *that* is where collapse
-  prevention becomes necessary, because the target stops being a measurement.
+- **Wiring the recurrent model into the browser.** Measured to be worth
+  +0.12 dB (see above) but not shipped: it needs an AudioWorklet mirroring
+  `bus.py` so the demo's world matches the one it was trained on, plus a GRU
+  step in `learned.js`.
+- **Latent-space prediction.** Both models decode to a *measured* spectrum, so
+  there is nothing to collapse into and no VICReg is needed. Predicting in a
+  learned latent instead — true JEPA — is the step where collapse prevention
+  becomes necessary, and it is untried here.
 - **Training on interaction traces.** `serve.py --record` captures them, but the
   current model is trained on randomised fader positions over separated stems,
   not on how a human actually moves faders.

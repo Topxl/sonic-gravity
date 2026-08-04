@@ -173,3 +173,115 @@ def collate(P_flat, g_flat, counts, idx, n_bands: int):
         g[k, :c] = g_flat[a:b]
         mask[k, :c] = 1.0
     return P, g, mask
+
+
+class RecurrentMixModel(nn.Module):
+    """Same prediction, but with a memory — for a bus that compresses.
+
+    A compressor makes the mix depend on its recent past: the same fader
+    position sounds different depending on how it was reached, and lowering one
+    channel changes the gain reduction, hence every other channel. A per-frame
+    model cannot represent any of that, however much capacity it is given.
+
+    So the per-channel context feeds a GRU whose hidden state carries whatever
+    the bus is currently doing. Everything else is unchanged — still a residual
+    on the analytic baseline, still permutation-invariant, still zero-initialised
+    at the output so an untrained model *is* the analytic field.
+
+    ⚠️ The recurrence is needed for TRAINING, not for the runtime gradient. On
+    the console the question is "what if I move this fader *now*", so the hidden
+    state is given and only a single step has to be differentiated. That is why
+    the browser never needs backpropagation through time — a fact that decides
+    whether this architecture is usable at 60 Hz at all.
+    """
+
+    def __init__(self, n_bands: int, width: int = 64, hidden: int = 96,
+                 state: int = 64, p_law: float = 2.0):
+        super().__init__()
+        self.n_bands = n_bands
+        self.p_law = p_law
+        self.width = width
+        self.hidden = hidden
+        self.state = state
+
+        self.enc = nn.Sequential(
+            nn.Linear(n_bands + 2, width), nn.SiLU(),
+            nn.Linear(width, width), nn.SiLU(),
+        )
+        # The GRU sees the pooled channel context AND the baseline's own claim:
+        # the compressor reacts to the mix, so the state has to know what the
+        # mix currently is.
+        # +1 : le NIVEAU absolu du mix. ⚠️ Sans lui, aucun modèle ne peut
+        # prédire ce que fait un compresseur : son seuil est en dB, et tout le
+        # reste de l'entrée est normalisé en forme. Mesuré le 2026-08-04 — sans
+        # cette entrée, ni la mémoire ni la capacité ne servaient à rien sur un
+        # bus compressé, parce que l'information décisive était absente.
+        self.gru = nn.GRUCell(width + n_bands + 1, state)
+        self.dec = nn.Sequential(
+            nn.Linear(state + width + n_bands + 1, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, n_bands),
+        )
+        nn.init.zeros_(self.dec[-1].weight)
+        nn.init.zeros_(self.dec[-1].bias)
+
+    def _context(self, P, g, mask):
+        total = P.sum(dim=-1, keepdim=True).clamp_min(EPS)
+        shape = torch.log10(P / total + EPS) * DB / 10.0
+        energy = torch.log10(total.squeeze(-1) + EPS) / 10.0
+        feats = torch.cat([shape, g.unsqueeze(-1), energy.unsqueeze(-1)], dim=-1)
+        h = self.enc(feats) * mask.unsqueeze(-1)
+        return h.sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+
+    def step(self, P, g, mask, h_prev):
+        """One frame. P: (B,C,N) · g: (B,C) · mask: (B,C) · h_prev: (B,state)."""
+        base = analytic_log_mix(P * mask.unsqueeze(-1), g, self.p_law)
+        base_n = normalise_shape(base)
+        # Absolute level of the mix, in dB — what a compressor's threshold acts on.
+        level = torch.logsumexp(base * (np.log(10) / DB), dim=-1, keepdim=True) * (
+            DB / np.log(10)
+        ) / 20.0
+        ctx = self._context(P, g, mask)
+        x = torch.cat([ctx, base_n / 10.0, level], dim=-1)
+        h = self.gru(x, h_prev)
+        delta = self.dec(torch.cat([h, x], dim=-1))
+        return base_n + delta, base_n, h
+
+    def forward(self, P, g, mask, no_memory: bool = False):
+        """Whole sequence. P: (B,T,C,N) · g: (B,T,C) · mask: (B,C) → (B,T,N).
+
+        `no_memory` re-zeroes the hidden state at every frame, which turns the
+        model into its own memoryless twin — same parameters, same capacity,
+        no access to the past. That is the ablation the recurrent claim rests
+        on: any gain over it is memory, not capacity.
+        """
+        B, T = P.shape[0], P.shape[1]
+        h = P.new_zeros(B, self.state)
+        preds, bases = [], []
+        for t in range(T):
+            pred, base, h_next = self.step(P[:, t], g[:, t], mask, h)
+            h = h.detach() * 0 if no_memory else h_next
+            preds.append(pred)
+            bases.append(base)
+        return torch.stack(preds, dim=1), torch.stack(bases, dim=1)
+
+    def to_weights(self) -> dict:
+        def layer(lin):
+            return {"W": np.round(lin.weight.detach().cpu().numpy().T, 5).tolist(),
+                    "b": np.round(lin.bias.detach().cpu().numpy(), 5).tolist()}
+
+        g = self.gru
+        return {
+            "kind": "recurrent",
+            "nBands": self.n_bands, "width": self.width,
+            "hidden": self.hidden, "state": self.state, "pLaw": self.p_law,
+            "enc": [layer(self.enc[0]), layer(self.enc[2])],
+            "dec": [layer(self.dec[0]), layer(self.dec[2]), layer(self.dec[4])],
+            "gru": {
+                "Wih": np.round(g.weight_ih.detach().cpu().numpy().T, 5).tolist(),
+                "Whh": np.round(g.weight_hh.detach().cpu().numpy().T, 5).tolist(),
+                "bih": np.round(g.bias_ih.detach().cpu().numpy(), 5).tolist(),
+                "bhh": np.round(g.bias_hh.detach().cpu().numpy(), 5).tolist(),
+            },
+            "activation": "silu",
+        }

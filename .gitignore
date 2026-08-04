@@ -15,3 +15,7 @@ sonic_gravity/traces/
 # reconstruct audio, but the set is large and not ours to redistribute — the
 # trained weights are committed instead, and `dataset.py` rebuilds it.
 sonic_gravity/data/
+
+# Recurrent model weights: a controlled experiment, not shipped to the demo.
+# The report below is committed; `train_seq.py` regenerates the weights.
+sonic_gravity/web/model_seq.json
