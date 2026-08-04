@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+
+# Interaction traces recorded by `serve.py --record` — training data, local only.
+sonic_gravity/traces/
+
+# Scenes built from your own stems (`prepare_demo.py`) may contain third-party
+# audio. The committed scene is the synthetic one from `make_demo_scene.py`.

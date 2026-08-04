@@ -1,0 +1,46 @@
+{
+  "source": "Synthetic scene (public domain)",
+  "hash": "synth-7",
+  "tempo": 100.0,
+  "start": 0.0,
+  "duration": 19.2,
+  "synthetic": true,
+  "tracks": [
+    {
+      "id": "drums",
+      "file": "audio/drums.opus",
+      "rms": 0.09625,
+      "bytes": 306552
+    },
+    {
+      "id": "bass",
+      "file": "audio/bass.opus",
+      "rms": 0.30229,
+      "bytes": 396525
+    },
+    {
+      "id": "keys",
+      "file": "audio/keys.opus",
+      "rms": 0.11489,
+      "bytes": 319470
+    },
+    {
+      "id": "lead",
+      "file": "audio/lead.opus",
+      "rms": 0.174,
+      "bytes": 449171
+    },
+    {
+      "id": "pad",
+      "file": "audio/pad.opus",
+      "rms": 0.09566,
+      "bytes": 302064
+    },
+    {
+      "id": "air",
+      "file": "audio/air.opus",
+      "rms": 0.07319,
+      "bytes": 240113
+    }
+  ]
+}

@@ -1,0 +1,200 @@
+/* Sobre, sombre, hairlines : la surface doit ressembler à du matériel, pas à
+   une page web. Aucune icône décorative, aucun émoji. */
+
+:root {
+  --bg: #07090c;
+  --panel: #12161c;
+  --edge: #1e242d;
+  --ink: #e6e9ef;
+  --ink2: #8b94a3;
+  --ink3: #525b69;
+  --accent: #a78bfa;
+  --good: #34d399;
+  --bad: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  overflow: hidden; /* les contrôles ne défilent jamais : seule la surface vit */
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 6px;
+  flex-wrap: wrap;
+}
+
+.title h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.title p {
+  margin: 1px 0 0;
+  font-size: 11px;
+  color: var(--ink3);
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+}
+
+button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #2b323d;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a0c10;
+  font-weight: 600;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px 8px;
+  flex-wrap: wrap;
+}
+
+.toggle,
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--ink2);
+}
+
+.slider input[type="range"] {
+  width: 110px;
+  accent-color: var(--accent);
+}
+
+.slider output {
+  min-width: 38px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.readout {
+  display: flex;
+  gap: 12px;
+  margin: 0;
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.readout div {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+}
+
+.readout dt {
+  color: var(--ink3);
+}
+
+.readout dd {
+  margin: 0;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge {
+  height: 2px;
+  margin: 0 12px 8px;
+  background: #161b22;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.gauge span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--good), #fbbf24 55%, var(--bad));
+  transition: width 90ms linear;
+}
+
+main {
+  flex: 1;
+  min-height: 0;
+  padding: 0 8px 6px;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 10px;
+}
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px 10px;
+  font-size: 11px;
+  color: var(--ink3);
+}
+
+.hint {
+  text-align: right;
+}
+
+.error {
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+  color: var(--bad);
+  font-size: 12px;
+}
+
+@media (max-width: 700px) {
+  .readout {
+    margin-left: 0;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .hint {
+    display: none; /* densité : sur téléphone la surface prend toute la place */
+  }
+}

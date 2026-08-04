@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Gravité sonore — X-Touch</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0c10'/%3E%3Crect x='7' y='5' width='3' height='22' rx='1.5' fill='%23223'/%3E%3Crect x='14.5' y='5' width='3' height='22' rx='1.5' fill='%23223'/%3E%3Crect x='22' y='5' width='3' height='22' rx='1.5' fill='%23223'/%3E%3Crect x='4' y='9' width='9' height='4' rx='1.5' fill='%23a78bfa'/%3E%3Crect x='11.5' y='17' width='9' height='4' rx='1.5' fill='%2334d399'/%3E%3Crect x='19' y='12' width='9' height='4' rx='1.5' fill='%23a78bfa'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="title">
+        <h1>Gravité sonore</h1>
+        <p id="source">chargement…</p>
+      </div>
+      <div class="actions">
+        <button id="play" class="primary" type="button">Écouter</button>
+        <button id="scramble" type="button">Dérégler</button>
+        <button id="release" type="button">Tout lâcher</button>
+      </div>
+    </header>
+
+    <div class="controls">
+      <label class="toggle">
+        <input id="gravity" type="checkbox" checked />
+        <span>Gravité</span>
+      </label>
+      <label class="slider" title="Force du moteur : à zéro, la console est inerte.">
+        <span>Poids</span>
+        <input id="assist" type="range" min="0" max="100" value="70" />
+        <output id="assist-val">70 %</output>
+      </label>
+      <label class="slider" title="À gauche, la gravité corrige autour de ton geste (exosquelette). À droite, elle reprend tout le mix (pilote automatique).">
+        <span>Liberté</span>
+        <input id="freedom" type="range" min="0" max="100" value="0" />
+        <output id="freedom-val">tenue</output>
+      </label>
+      <dl class="readout">
+        <div><dt>V</dt><dd id="v-total">—</dd></div>
+        <div><dt>gabarit</dt><dd id="v-tilt">—</dd></div>
+        <div><dt>masquage</dt><dd id="v-mask">—</dd></div>
+        <div><dt>niveau</dt><dd id="v-level">—</dd></div>
+      </dl>
+    </div>
+    <div class="gauge"><span id="v-bar"></span></div>
+
+    <main>
+      <canvas id="surface"></canvas>
+    </main>
+
+    <p id="error" class="error" hidden></p>
+    <footer>
+      <span id="target-info"></span>
+      <span class="hint">
+        Prends un fader : il résiste. Lâche-le : il tombe dans la vallée verte.
+      </span>
+    </footer>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+# Runtime for the server and the scene builders.
+numpy>=1.24
+soundfile>=0.12
+fastapi>=0.110
+uvicorn>=0.27
+
+# ffmpeg must be on PATH to encode the demo scene (system package, not pip).

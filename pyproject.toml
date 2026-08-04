@@ -1,0 +1,18 @@
+[project]
+name = "sonic-gravity"
+version = "0.1.0"
+description = "A mixing console whose motorised faders resist a bad mix and settle into a good one"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["numpy>=1.24", "soundfile>=0.12", "fastapi>=0.110", "uvicorn>=0.27"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
